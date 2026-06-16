@@ -6,8 +6,7 @@
 Markov Regime Daily Signal — BTC-USD → Telegram
 Framework: Roan (@RohOnChain). Adapted for daily GitHub Actions delivery.
 
-Matrix display order: Bull → Sideways → Bear (rows & cols)
-Sends one MarkdownV2 message per run via Telegram Bot API.
+parse_mode: HTML  (avoids all MarkdownV2 reserved-character escaping issues)
 """
 from __future__ import annotations
 
@@ -31,22 +30,19 @@ BOT_TOKEN   = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID     = os.environ["TELEGRAM_CHAT_ID"]
 ENABLE_HMM  = os.getenv("ENABLE_HMM", "true").lower() == "true"
 
-# Internal state indices: 0=Bear  1=Sideways  2=Bull
-# Display order:          Bull=2  Sideways=1  Bear=0  → reindex [2,1,0]
 INTERNAL_STATES = ["Bear", "Sideways", "Bull"]
-DISPLAY_ORDER   = [2, 1, 0]
+DISPLAY_ORDER   = [2, 1, 0]   # Bull, Sideways, Bear
 
 
-# ── MarkdownV2 escaping ───────────────────────────────────────────────────────
-# Apply to ALL dynamic plain-text outside backtick/pre/bold/italic spans.
-# Full list of chars reserved by Telegram MarkdownV2:
-_MDV2_RESERVED = r"\_*[]()~`>#+-=|{}.!"
-
+# ── HTML helpers ──────────────────────────────────────────────────────────────
+def b(text: str) -> str:   return f"<b>{text}</b>"
+def code(text: str) -> str: return f"<code>{text}</code>"
+def pre(text: str) -> str:  return f"<pre>{text}</pre>"
 def esc(text: str) -> str:
-    """Escape a plain-text string for Telegram MarkdownV2."""
-    for ch in _MDV2_RESERVED:
-        text = text.replace(ch, f"\\{ch}")
-    return text
+    """Escape the three chars HTML reserves. Safe to call on any string."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+DIV = "━" * 21
 
 
 # ── Data ──────────────────────────────────────────────────────────────────────
@@ -81,8 +77,8 @@ def fetch_close(ticker: str, years: int) -> pd.Series:
 def label_regimes(close: pd.Series) -> pd.Series:
     rolling_return = close.pct_change(WINDOW)
     labels = pd.Series(1, index=close.index, dtype=int)
-    labels[rolling_return >  THRESHOLD] = 2   # Bull
-    labels[rolling_return < -THRESHOLD] = 0   # Bear
+    labels[rolling_return >  THRESHOLD] = 2
+    labels[rolling_return < -THRESHOLD] = 0
     return labels.loc[rolling_return.notna()]
 
 
@@ -115,10 +111,10 @@ def walk_forward_backtest(close: pd.Series, labels: pd.Series) -> dict:
         counts[lab[i], lab[i + 1]] += 1.0
     strategy_returns = []
     for t in range(MIN_TRAIN, len(lab) - 1):
-        safe    = np.where(counts.sum(axis=1, keepdims=True) == 0, 1.0,
-                           counts.sum(axis=1, keepdims=True))
-        P_t     = counts / safe
-        signal  = float(P_t[lab[t], 2] - P_t[lab[t], 0])
+        safe   = np.where(counts.sum(axis=1, keepdims=True) == 0, 1.0,
+                          counts.sum(axis=1, keepdims=True))
+        P_t    = counts / safe
+        signal = float(P_t[lab[t], 2] - P_t[lab[t], 0])
         strategy_returns.append(float(np.sign(signal)) * rets[t + 1])
         counts[lab[t - 1], lab[t]] += 1.0
     sr     = np.array(strategy_returns)
@@ -157,82 +153,81 @@ def build_message(close: pd.Series, labels: pd.Series, P: np.ndarray,
 
     signal    = float(nd[2] - nd[0])
     direction = (
-        "\U0001f7e2 LONG"    if signal >= 0.3  else
-        "\U0001f534 SHORT"   if signal <= -0.3 else
-        "\U0001f7e1 NEUTRAL"
+        "🟢 LONG"    if signal >= 0.3  else
+        "🔴 SHORT"   if signal <= -0.3 else
+        "🟡 NEUTRAL"
     )
     filled = int(abs(signal) * 10)
-    bar    = "\u2588" * filled + "\u2591" * (10 - filled)
+    bar    = "█" * filled + "░" * (10 - filled)
 
     last_price = float(close.iloc[-1])
-    # esc() all dynamic plain-text — dates contain '-', ticker contains '-'
     last_date  = esc(str(close.index[-1].date()))
     run_date   = esc(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
     ticker_esc = esc(TICKER)
 
+    matrix_lines = (
+        "          Bull    Side    Bear\n"
+        f"Bull     {P_d[0,0]*100:5.1f}%  {P_d[0,1]*100:5.1f}%  {P_d[0,2]*100:5.1f}%\n"
+        f"Side     {P_d[1,0]*100:5.1f}%  {P_d[1,1]*100:5.1f}%  {P_d[1,2]*100:5.1f}%\n"
+        f"Bear     {P_d[2,0]*100:5.1f}%  {P_d[2,1]*100:5.1f}%  {P_d[2,2]*100:5.1f}%"
+    )
+
     lines = [
-        f"\U0001f4ca *{ticker_esc} Markov Daily Signal*",
-        f"\U0001f5d3 {run_date}",
-        f"\U0001f4b0 Last Close: `${last_price:,.2f}` \\(as of {last_date}\\)",
+        f"📊 {b(ticker_esc + ' Markov Daily Signal')}",
+        f"🗓 {run_date}",
+        f"💰 Last Close: {code('$' + f'{last_price:,.2f}')} (as of {last_date})",
         "",
-        "\u2501" * 21,
-        f"\U0001f535 *Current Regime:* `{cs_label}`",
-        f"\U0001f4e1 *Signal:* `{signal:+.4f}` \u2192 {direction}",
+        DIV,
+        f"🔵 {b('Current Regime:')} {code(cs_label)}",
+        f"📡 {b('Signal:')} {code(f'{signal:+.4f}')} → {direction}",
         bar,
         "",
-        "\u2501" * 21,
-        "\U0001f4d0 *3\u00d73 Transition Matrix \\(P\u00b9\\)*",
-        "\\(Rows = Today \u2192 Cols = Tomorrow\\)",
+        DIV,
+        f"📐 {b('3×3 Transition Matrix (P¹)')}",
+        "(Rows = Today → Cols = Tomorrow)",
         "",
-        "```",
-        "          Bull    Side    Bear",
-        f"Bull     {P_d[0,0]*100:5.1f}%  {P_d[0,1]*100:5.1f}%  {P_d[0,2]*100:5.1f}%",
-        f"Side     {P_d[1,0]*100:5.1f}%  {P_d[1,1]*100:5.1f}%  {P_d[1,2]*100:5.1f}%",
-        f"Bear     {P_d[2,0]*100:5.1f}%  {P_d[2,1]*100:5.1f}%  {P_d[2,2]*100:5.1f}%",
-        "```",
+        pre(matrix_lines),
         "",
-        "\U0001f512 *Persistence \\(diagonal\\):*",
-        f"\u2022 \U0001f7e2 Bull  \u2192 Bull:  `{P_d[0,0]*100:.1f}%`",
-        f"\u2022 \U0001f7e1 Side  \u2192 Side:  `{P_d[1,1]*100:.1f}%`",
-        f"\u2022 \U0001f534 Bear  \u2192 Bear:  `{P_d[2,2]*100:.1f}%`",
+        f"🔒 {b('Persistence (diagonal):')}",
+        f"• 🟢 Bull  → Bull:  {code(f'{P_d[0,0]*100:.1f}%')}",
+        f"• 🟡 Side  → Side:  {code(f'{P_d[1,1]*100:.1f}%')}",
+        f"• 🔴 Bear  → Bear:  {code(f'{P_d[2,2]*100:.1f}%')}",
         "",
-        "\u2501" * 21,
-        f"\U0001f52e *Multi\\-Step Forecast from* `{cs_label}`",
+        DIV,
+        f"🔮 {b('Multi-Step Forecast from')} {code(cs_label)}",
         "",
-        "*1\\-Day \\(P\u00b9\\):*",
-        f"\U0001f7e2 Bull `{nd[2]*100:.2f}%`  \U0001f7e1 Side `{nd[1]*100:.2f}%`  \U0001f534 Bear `{nd[0]*100:.2f}%`",
+        f"{b('1-Day (P¹):')}",
+        f"🟢 Bull {code(f'{nd[2]*100:.2f}%')}  🟡 Side {code(f'{nd[1]*100:.2f}%')}  🔴 Bear {code(f'{nd[0]*100:.2f}%')}",
         "",
-        "*2\\-Day \\(P\u00b2\\):*",
-        f"\U0001f7e2 Bull `{d2[2]*100:.2f}%`  \U0001f7e1 Side `{d2[1]*100:.2f}%`  \U0001f534 Bear `{d2[0]*100:.2f}%`",
+        f"{b('2-Day (P²):')}",
+        f"🟢 Bull {code(f'{d2[2]*100:.2f}%')}  🟡 Side {code(f'{d2[1]*100:.2f}%')}  🔴 Bear {code(f'{d2[0]*100:.2f}%')}",
         "",
-        "*3\\-Day \\(P\u00b3\\):*",
-        f"\U0001f7e2 Bull `{d3[2]*100:.2f}%`  \U0001f7e1 Side `{d3[1]*100:.2f}%`  \U0001f534 Bear `{d3[0]*100:.2f}%`",
+        f"{b('3-Day (P³):')}",
+        f"🟢 Bull {code(f'{d3[2]*100:.2f}%')}  🟡 Side {code(f'{d3[1]*100:.2f}%')}  🔴 Bear {code(f'{d3[0]*100:.2f}%')}",
         "",
-        "\U0001f4ca *Long\\-Run Stationary:*",
-        f"Bull `{pi[2]*100:.1f}%`  Side `{pi[1]*100:.1f}%`  Bear `{pi[0]*100:.1f}%`",
+        f"📊 {b('Long-Run Stationary:')}",
+        f"Bull {code(f'{pi[2]*100:.1f}%')}  Side {code(f'{pi[1]*100:.1f}%')}  Bear {code(f'{pi[0]*100:.1f}%')}",
         "",
-        "\u2501" * 21,
-        "\U0001f52c *HMM Regime Confirmation:*",
+        DIV,
+        f"🔬 {b('HMM Regime Confirmation:')}",
     ]
 
     if hmm_regimes:
         for lbl, k, m in hmm_regimes:
-            emoji = (
-                "\U0001f534" if lbl == "Bear"     else
-                "\U0001f7e1" if lbl == "Sideways" else
-                "\U0001f7e2"
-            )
-            lines.append(f"\u2022 {emoji} {lbl}: `{m*100:+.3f}%` mean daily return")
+            emoji = "🔴" if lbl == "Bear" else ("🟡" if lbl == "Sideways" else "🟢")
+            lines.append(f"• {emoji} {lbl}: {code(f'{m*100:+.3f}%')} mean daily return")
     else:
-        lines.append("\u2022 _hmmlearn unavailable \u2014 skipped_")
+        lines.append("• <i>hmmlearn unavailable — skipped</i>")
 
     lines += [
         "",
-        "\u2501" * 21,
-        "\U0001f4c8 *Walk\\-Forward Backtest \\(10yr\\):*",
-        f"\u2022 Sharpe \\(ann\\.\\): `{bt['sharpe']:.3f}`",
-        f"\u2022 Max Drawdown:  `{bt['max_drawdown']*100:.2f}%`",
-        f"\u2022 Trades:        `{bt['n_trades']:,}`",
+        DIV,
+        f"📈 {b('Walk-Forward Backtest (10yr):')}",
+        f"• Sharpe (ann.): {code(f'{bt[\"sharpe\"]:.3f}')}",
+        f"• Max Drawdown:  {code(f'{bt[\"max_drawdown\"]*100:.2f}%')}",
+        f"• Trades:        {code(f'{bt[\"n_trades\"]:,}')}",
+        "",
+        "<i>⚠️ Backtests are historical. Not financial advice.</i>",
     ]
 
     return "\n".join(lines)
@@ -241,19 +236,19 @@ def build_message(close: pd.Series, labels: pd.Series, P: np.ndarray,
 # ── Telegram sender ───────────────────────────────────────────────────────────
 def send_telegram(message: str) -> None:
     url  = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": message, "parse_mode": "MarkdownV2"}
+    data = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
     r    = requests.post(url, json=data, timeout=30)
     if not r.ok:
         print(f"Telegram error {r.status_code}: {r.text}", file=sys.stderr)
         sys.exit(1)
-    print("\u2705 Telegram message sent.")
+    print("✅ Telegram message sent.")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
-    print(f"Fetching {TICKER} ({YEARS}yr history)\u2026")
+    print(f"Fetching {TICKER} ({YEARS}yr history)…")
     close  = fetch_close(TICKER, YEARS)
-    print(f"  {len(close)} rows | {close.index[0].date()} \u2192 {close.index[-1].date()}")
+    print(f"  {len(close)} rows | {close.index[0].date()} → {close.index[-1].date()}")
     labels = label_regimes(close)
     P      = build_transition_matrix(labels)
     pi     = stationary_distribution(P)
