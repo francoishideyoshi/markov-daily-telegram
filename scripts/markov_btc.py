@@ -35,18 +35,16 @@ DISPLAY_ORDER   = [2, 1, 0]   # Bull, Sideways, Bear
 
 
 # ── HTML helpers ──────────────────────────────────────────────────────────────
-def b(text: str) -> str:   return f"<b>{text}</b>"
-def code(text: str) -> str: return f"<code>{text}</code>"
-def pre(text: str) -> str:  return f"<pre>{text}</pre>"
-def esc(text: str) -> str:
-    """Escape the three chars HTML reserves. Safe to call on any string."""
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+def b(t):    return f"<b>{t}</b>"
+def code(t): return f"<code>{t}</code>"
+def pre(t):  return f"<pre>{t}</pre>"
+def esc(t):  return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 DIV = "━" * 21
 
 
 # ── Data ──────────────────────────────────────────────────────────────────────
-def fetch_close(ticker: str, years: int) -> pd.Series:
+def fetch_close(ticker, years):
     end   = pd.Timestamp.now("UTC").tz_localize(None).normalize()
     start = end - pd.DateOffset(years=years)
     for attempt in (1, 2):
@@ -74,7 +72,7 @@ def fetch_close(ticker: str, years: int) -> pd.Series:
 
 
 # ── Core model ────────────────────────────────────────────────────────────────
-def label_regimes(close: pd.Series) -> pd.Series:
+def label_regimes(close):
     rolling_return = close.pct_change(WINDOW)
     labels = pd.Series(1, index=close.index, dtype=int)
     labels[rolling_return >  THRESHOLD] = 2
@@ -82,7 +80,7 @@ def label_regimes(close: pd.Series) -> pd.Series:
     return labels.loc[rolling_return.notna()]
 
 
-def build_transition_matrix(labels: pd.Series) -> np.ndarray:
+def build_transition_matrix(labels):
     counts = np.zeros((3, 3), dtype=float)
     arr = np.asarray(labels, dtype=int)
     for i in range(len(arr) - 1):
@@ -92,14 +90,14 @@ def build_transition_matrix(labels: pd.Series) -> np.ndarray:
     return counts / row_sums
 
 
-def stationary_distribution(P: np.ndarray) -> np.ndarray:
+def stationary_distribution(P):
     eigvals, eigvecs = np.linalg.eig(P.T)
     idx = np.argmin(np.abs(eigvals - 1.0))
     vec = np.abs(np.real(eigvecs[:, idx]))
     return vec / vec.sum()
 
 
-def walk_forward_backtest(close: pd.Series, labels: pd.Series) -> dict:
+def walk_forward_backtest(close, labels):
     daily_ret = close.pct_change().dropna()
     idx       = labels.index.intersection(daily_ret.index)
     lab       = np.asarray(labels.loc[idx], dtype=int)
@@ -125,7 +123,7 @@ def walk_forward_backtest(close: pd.Series, labels: pd.Series) -> dict:
     return {"sharpe": sharpe, "max_drawdown": max_dd, "n_trades": len(sr)}
 
 
-def fit_hmm(close: pd.Series):
+def fit_hmm(close):
     try:
         from hmmlearn import hmm as _hmm
     except Exception:
@@ -141,8 +139,7 @@ def fit_hmm(close: pd.Series):
 
 
 # ── Message builder ───────────────────────────────────────────────────────────
-def build_message(close: pd.Series, labels: pd.Series, P: np.ndarray,
-                  pi: np.ndarray, bt: dict, hmm_regimes) -> str:
+def build_message(close, labels, P, pi, bt, hmm_regimes):
     P_d = P[np.ix_(DISPLAY_ORDER, DISPLAY_ORDER)]
     P2  = np.linalg.matrix_power(P, 2)
     P3  = np.linalg.matrix_power(P, 3)
@@ -165,7 +162,11 @@ def build_message(close: pd.Series, labels: pd.Series, P: np.ndarray,
     run_date   = esc(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
     ticker_esc = esc(TICKER)
 
-    matrix_lines = (
+    # Format price and signal outside f-strings to avoid nested quote issues
+    price_str  = f"{last_price:,.2f}"
+    signal_str = f"{signal:+.4f}"
+
+    matrix_block = (
         "          Bull    Side    Bear\n"
         f"Bull     {P_d[0,0]*100:5.1f}%  {P_d[0,1]*100:5.1f}%  {P_d[0,2]*100:5.1f}%\n"
         f"Side     {P_d[1,0]*100:5.1f}%  {P_d[1,1]*100:5.1f}%  {P_d[1,2]*100:5.1f}%\n"
@@ -175,38 +176,38 @@ def build_message(close: pd.Series, labels: pd.Series, P: np.ndarray,
     lines = [
         f"📊 {b(ticker_esc + ' Markov Daily Signal')}",
         f"🗓 {run_date}",
-        f"💰 Last Close: {code('$' + f'{last_price:,.2f}')} (as of {last_date})",
+        f"💰 Last Close: {code('$' + price_str)} (as of {last_date})",
         "",
         DIV,
         f"🔵 {b('Current Regime:')} {code(cs_label)}",
-        f"📡 {b('Signal:')} {code(f'{signal:+.4f}')} → {direction}",
+        f"📡 {b('Signal:')} {code(signal_str)} → {direction}",
         bar,
         "",
         DIV,
         f"📐 {b('3×3 Transition Matrix (P¹)')}",
         "(Rows = Today → Cols = Tomorrow)",
         "",
-        pre(matrix_lines),
+        pre(matrix_block),
         "",
         f"🔒 {b('Persistence (diagonal):')}",
-        f"• 🟢 Bull  → Bull:  {code(f'{P_d[0,0]*100:.1f}%')}",
-        f"• 🟡 Side  → Side:  {code(f'{P_d[1,1]*100:.1f}%')}",
-        f"• 🔴 Bear  → Bear:  {code(f'{P_d[2,2]*100:.1f}%')}",
+        f"• 🟢 Bull  → Bull:  {code(str(round(P_d[0,0]*100, 1)) + '%')}",
+        f"• 🟡 Side  → Side:  {code(str(round(P_d[1,1]*100, 1)) + '%')}",
+        f"• 🔴 Bear  → Bear:  {code(str(round(P_d[2,2]*100, 1)) + '%')}",
         "",
         DIV,
         f"🔮 {b('Multi-Step Forecast from')} {code(cs_label)}",
         "",
-        f"{b('1-Day (P¹):')}",
-        f"🟢 Bull {code(f'{nd[2]*100:.2f}%')}  🟡 Side {code(f'{nd[1]*100:.2f}%')}  🔴 Bear {code(f'{nd[0]*100:.2f}%')}",
+        b("1-Day (P¹):"),
+        f"🟢 Bull {code(str(round(nd[2]*100,2))+'%')}  🟡 Side {code(str(round(nd[1]*100,2))+'%')}  🔴 Bear {code(str(round(nd[0]*100,2))+'%')}",
         "",
-        f"{b('2-Day (P²):')}",
-        f"🟢 Bull {code(f'{d2[2]*100:.2f}%')}  🟡 Side {code(f'{d2[1]*100:.2f}%')}  🔴 Bear {code(f'{d2[0]*100:.2f}%')}",
+        b("2-Day (P²):"),
+        f"🟢 Bull {code(str(round(d2[2]*100,2))+'%')}  🟡 Side {code(str(round(d2[1]*100,2))+'%')}  🔴 Bear {code(str(round(d2[0]*100,2))+'%')}",
         "",
-        f"{b('3-Day (P³):')}",
-        f"🟢 Bull {code(f'{d3[2]*100:.2f}%')}  🟡 Side {code(f'{d3[1]*100:.2f}%')}  🔴 Bear {code(f'{d3[0]*100:.2f}%')}",
+        b("3-Day (P³):"),
+        f"🟢 Bull {code(str(round(d3[2]*100,2))+'%')}  🟡 Side {code(str(round(d3[1]*100,2))+'%')}  🔴 Bear {code(str(round(d3[0]*100,2))+'%')}",
         "",
         f"📊 {b('Long-Run Stationary:')}",
-        f"Bull {code(f'{pi[2]*100:.1f}%')}  Side {code(f'{pi[1]*100:.1f}%')}  Bear {code(f'{pi[0]*100:.1f}%')}",
+        f"Bull {code(str(round(pi[2]*100,1))+'%')}  Side {code(str(round(pi[1]*100,1))+'%')}  Bear {code(str(round(pi[0]*100,1))+'%')}",
         "",
         DIV,
         f"🔬 {b('HMM Regime Confirmation:')}",
@@ -214,18 +215,24 @@ def build_message(close: pd.Series, labels: pd.Series, P: np.ndarray,
 
     if hmm_regimes:
         for lbl, k, m in hmm_regimes:
-            emoji = "🔴" if lbl == "Bear" else ("🟡" if lbl == "Sideways" else "🟢")
-            lines.append(f"• {emoji} {lbl}: {code(f'{m*100:+.3f}%')} mean daily return")
+            emoji   = "🔴" if lbl == "Bear" else ("🟡" if lbl == "Sideways" else "🟢")
+            m_str   = ("+" if m >= 0 else "") + str(round(m * 100, 3)) + "%"
+            lines.append(f"• {emoji} {lbl}: {code(m_str)} mean daily return")
     else:
         lines.append("• <i>hmmlearn unavailable — skipped</i>")
+
+    # Extract bt values into plain variables — no nested quotes in f-strings
+    sharpe_str   = str(round(bt["sharpe"], 3))
+    drawdown_str = str(round(bt["max_drawdown"] * 100, 2)) + "%"
+    trades_str   = f"{bt['n_trades']:,}"
 
     lines += [
         "",
         DIV,
         f"📈 {b('Walk-Forward Backtest (10yr):')}",
-        f"• Sharpe (ann.): {code(f'{bt[\"sharpe\"]:.3f}')}",
-        f"• Max Drawdown:  {code(f'{bt[\"max_drawdown\"]*100:.2f}%')}",
-        f"• Trades:        {code(f'{bt[\"n_trades\"]:,}')}",
+        f"• Sharpe (ann.):  {code(sharpe_str)}",
+        f"• Max Drawdown:   {code(drawdown_str)}",
+        f"• Trades:         {code(trades_str)}",
         "",
         "<i>⚠️ Backtests are historical. Not financial advice.</i>",
     ]
@@ -234,7 +241,7 @@ def build_message(close: pd.Series, labels: pd.Series, P: np.ndarray,
 
 
 # ── Telegram sender ───────────────────────────────────────────────────────────
-def send_telegram(message: str) -> None:
+def send_telegram(message):
     url  = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
     r    = requests.post(url, json=data, timeout=30)
@@ -245,7 +252,7 @@ def send_telegram(message: str) -> None:
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def main() -> None:
+def main():
     print(f"Fetching {TICKER} ({YEARS}yr history)…")
     close  = fetch_close(TICKER, YEARS)
     print(f"  {len(close)} rows | {close.index[0].date()} → {close.index[-1].date()}")
